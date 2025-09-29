@@ -1,0 +1,136 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.sshd.common.forward;
+
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.util.concurrent.TimeUnit;
+
+import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.Session;
+import org.apache.sshd.common.util.net.SshdSocketAddress;
+import org.apache.sshd.core.CoreModuleProperties;
+import org.apache.sshd.server.SshServer;
+import org.apache.sshd.server.forward.AcceptAllForwardingFilter;
+import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
+import org.apache.sshd.util.test.CoreTestSupportUtils;
+import org.apache.sshd.util.test.JSchLogger;
+import org.apache.sshd.util.test.JSchUtils;
+import org.apache.sshd.util.test.SimpleUserInfo;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.MethodOrderer.MethodName;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Port forwarding tests - Apache server, JSch client
+ */
+@TestMethodOrder(MethodName.class)
+public class ApacheServerJSchClientTest extends AbstractServerCloseTestSupport {
+    private static final long TIMEOUT = TimeUnit.SECONDS.toMillis(10L);
+    private static final Logger LOG = LoggerFactory.getLogger(ApacheServerJSchClientTest.class);
+
+    private static int sshServerPort;
+    private static SshServer server;
+
+    private Session session;
+
+    public ApacheServerJSchClientTest() {
+        super();
+    }
+
+    private static int findFreePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        }
+    }
+
+    /*
+     * Starts an SSH Server
+     */
+    @BeforeAll
+    static void startSshServer() throws IOException {
+        LOG.info("Starting SSHD...");
+        server = CoreTestSupportUtils.setupTestFullSupportServer(SshServer.setUpDefaultServer());
+        server.setPasswordAuthenticator((u, p, s) -> true);
+        server.setForwardingFilter(AcceptAllForwardingFilter.INSTANCE);
+        server.setKeyPairProvider(new SimpleGeneratorHostKeyProvider());
+        CoreModuleProperties.NIO2_READ_BUFFER_SIZE.set(server, 32 * 1024);
+        CoreModuleProperties.MIN_READ_BUFFER_SIZE.set(server, 32 * 1024);
+        server.start();
+        sshServerPort = server.getPort();
+        LOG.info("SSHD Running on port {}", server.getPort());
+    }
+
+    @BeforeAll
+    static void jschInit() {
+        JSchLogger.init();
+    }
+
+    @AfterAll
+    static void stopServer() throws IOException {
+        if (!server.close(true).await(TIMEOUT)) {
+            LOG.warn("Failed to close server within {} sec.", TimeUnit.MILLISECONDS.toSeconds(TIMEOUT));
+        }
+    }
+
+    @BeforeEach
+    void createClient() throws Exception {
+        JSch client = new JSch();
+        session = client.getSession("user", TEST_LOCALHOST, sshServerPort);
+        session.setUserInfo(new SimpleUserInfo("password"));
+        LOG.trace("Connecting session...");
+        session.connect();
+        LOG.trace("Client is running now...");
+    }
+
+    @AfterEach
+    void stopClient() throws Exception {
+        LOG.info("Disconnecting Client");
+        session.disconnect();
+    }
+
+    @Override
+    protected SshdSocketAddress startRemotePF() throws Exception {
+        int port = findFreePort();
+        JSchUtils.setRemotePortForwarding(session, TEST_LOCALHOST, port, TEST_LOCALHOST, testServerPort);
+        return new SshdSocketAddress(TEST_LOCALHOST, port);
+    }
+
+    @Override
+    protected SshdSocketAddress startLocalPF() throws Exception {
+        int port = findFreePort();
+        session.setPortForwardingL(TEST_LOCALHOST, port, TEST_LOCALHOST, testServerPort);
+        return new SshdSocketAddress(TEST_LOCALHOST, port);
+    }
+
+    @Override
+    protected void stopRemotePF(SshdSocketAddress bound) throws Exception {
+        session.delPortForwardingR(bound.getPort());
+    }
+
+    @Override
+    protected void stopLocalPF(SshdSocketAddress bound) throws Exception {
+        session.delPortForwardingL(bound.getPort());
+    }
+}
